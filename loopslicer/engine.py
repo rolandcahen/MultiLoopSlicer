@@ -1,16 +1,21 @@
 """
 Moteur de MultiLoop Slicer.
 
-Deux modes d'entrée :
-  * « slice »  : un seul fichier audio à tempo fixe est découpé en boucles de
-                 N mesures, calées sur la grille des mesures, toutes de durée
-                 strictement identique (au sample près).
-  * « merge »  : plusieurs fichiers (une boucle par fichier) sont mis à la même
-                 longueur et rassemblés.
+Reprend loop_slicer.py (R. Cahen) : analyse de la grille de tempo, sélection
+des boucles les plus différenciées, longueurs exactes, fondus anti-clic.
+Ajouts : classement par descripteur (sonie, énergie, brillance, harmonicité,
+activité rythmique), mode assemblage multi-fichiers, choix du format de sortie
+et du nombre de pistes.
 
-Les boucles sont ensuite classées selon un descripteur (sens croissant ou
-décroissant) et écrites dans UN fichier multicanal : boucle 1 → canaux 1-2,
-boucle 2 → canaux 3-4, etc. (ou 1 canal par boucle en mode mono).
+Deux modes d'entrée :
+  * « découpage »  : un fichier à tempo fixe est découpé en boucles de N
+                     mesures, calées sur la grille de mesures (et de phrases),
+                     toutes de durée strictement identique.
+  * « assemblage » : plusieurs fichiers (une boucle par fichier) sont mis à la
+                     même longueur et rassemblés.
+
+Les boucles sont classées selon un descripteur (croissant ou décroissant) et
+écrites dans UN fichier multicanal : boucle 1 → canaux 1-2, boucle 2 → 3-4…
 """
 
 from __future__ import annotations
@@ -18,6 +23,9 @@ from __future__ import annotations
 import csv
 import json
 import os
+import shutil
+import subprocess
+import tempfile
 from dataclasses import dataclass, field, asdict
 from typing import Callable, List, Optional, Sequence
 
@@ -37,6 +45,7 @@ DESCRIPTORS = {
     "brightness": ("Brillance (centroïde)", "Centre de gravité spectral, en Hz"),
     "harmonicity": ("Harmonicité", "Part tonale / harmonique vs bruit et percussions"),
     "activity": ("Activité rythmique", "Densité d'attaques, impulsivité, part percussive, fluctuation"),
+    "distinctiveness": ("Distinctivité", "Ordre de choix par la sélection (les plus différenciées d'abord)"),
     "position": ("Position d'origine", "Ordre chronologique dans le fichier source"),
 }
 
@@ -55,19 +64,32 @@ Progress = Callable[[float], None]
 
 @dataclass
 class Settings:
+    # découpage
     measures_per_loop: int = 2
     beats_per_measure: int = 4
     bpm: Optional[float] = None          # None = détection automatique
+    snap_bpm: bool = True                # arrondi au BPM entier si très proche
+    phrase_bars: int = 2                 # les boucles démarrent toutes les N mesures
+    downbeat_shift: int = 0              # correction manuelle (en temps)
+    phrase_shift: int = 0                # correction manuelle (en mesures)
+    beat_offset_ms: float = 0.0          # décalage fin de toute la grille
+    preroll_ms: float = 0.0              # démarre chaque boucle un peu avant le temps
+    # sélection
+    min_dist: float = 0.5                # distinctivité minimale pour ajouter une boucle
+    loud_floor: float = -45.0            # ignore les segments sous ce niveau (LUFS)
+    weights: tuple = (1.0, 1.0, 1.0, 0.7)  # timbre, harmonie, texture, loudness
+    # classement
     descriptor: str = "loudness"
     ascending: bool = True               # True = up (du plus faible au plus fort)
-    n_tracks: int = 0                    # canaux du fichier de sortie ; 0 = auto
-    channels_per_loop: int = 2           # 2 = stéréo, 1 = mono
+    # sortie
+    n_tracks: int = 64                   # canaux du fichier de sortie ; 0 = auto
+    channels_per_loop: int = 2           # 2 = stereo, 1 = mono
     file_format: str = "WAV"
     sample_rate: int = 48000
     subtype_label: str = "32 bit float"
     fade_ms: float = 1.0
-    skip_silent_db: float = -60.0        # boucles plus faibles ignorées (LUFS)
-    output_dir: Optional[str] = None     # None = dossier du premier fichier
+    export_individual: bool = False      # écrit aussi un fichier par boucle
+    output_dir: Optional[str] = None     # None = <source>_Loops à côté du fichier
 
 
 @dataclass
@@ -75,224 +97,357 @@ class Loop:
     index: int                 # position d'origine (1 = première)
     source: str                # nom du fichier source
     start_sample: int          # début dans le fichier source (sr d'origine)
-    start_measure: float       # n° de mesure (1 = première mesure complète)
-    audio: np.ndarray = field(repr=False)   # (n_samples, channels) au sr de sortie
+    start_measure: float       # n° de mesure (1 = mesure 1 de la grille)
+    raw: np.ndarray = field(repr=False)     # segment stéréo au sr source
+    sr_in: int = 0
+    audio: Optional[np.ndarray] = field(default=None, repr=False)  # au sr de sortie
+    distinct: float = float("nan")          # distance min. aux boucles déjà choisies
+    pick_order: int = 0
     features: dict = field(default_factory=dict)
 
 
 # --------------------------------------------------------------------------
-# Lecture
+# Lecture (loop_slicer.py)
 # --------------------------------------------------------------------------
 
 def load_audio(path: str):
-    """Lit wav / aiff / flac / mp3. Renvoie (signal (n, ch) float64, sr)."""
+    """Renvoie (signal float64 stéréo, sr). Décode via ffmpeg si libsndfile
+    ne sait pas lire le format (m4a, aac…)."""
+    tmp = None
+    try:
+        sf.info(path)
+    except Exception:
+        if shutil.which("ffmpeg"):
+            tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", path,
+                            "-c:a", "pcm_f32le", tmp], check=True)
+            path = tmp
     try:
         y, sr = sf.read(path, dtype="float64", always_2d=True)
     except Exception:
-        # repli : librosa / audioread (mp3 avec un vieux libsndfile, m4a…)
         y, sr = librosa.load(path, sr=None, mono=False)
         y = np.atleast_2d(y).T.astype(np.float64)
-    return y, int(sr)
+    finally:
+        if tmp:
+            os.unlink(tmp)
+    if y.shape[1] == 1:
+        y = np.repeat(y, 2, axis=1)
+    return y[:, :2], int(sr)
 
 
 # --------------------------------------------------------------------------
-# Tempo et grille de mesures
+# Tempo (loop_slicer.py)
 # --------------------------------------------------------------------------
 
-def _refine_phase(mono: np.ndarray, sr: int, beat_dur: float, coarse: float) -> float:
-    """Affine la phase de la grille à ~1 ms près.
-
-    On calcule la montée d'énergie (dérivée positive du log-énergie, fenêtres
-    courtes) et on la « replie » modulo la durée d'un temps : les attaques
-    alignées sur la grille s'additionnent et forment un pic net. On cherche ce
-    pic au voisinage (±40 ms) de l'estimation grossière.
-    """
-    hop, win = 32, 128
-    n = (len(mono) - win) // hop
-    if n < 10:
-        return coarse
-    frames = np.lib.stride_tricks.sliding_window_view(mono, win)[::hop][:n]
-    e = np.log10((frames.astype(np.float64) ** 2).mean(axis=1) + 1e-10)
-    d = np.maximum(0.0, np.diff(e))
-    t = (np.arange(len(d)) * hop + win) / sr       # fin de fenêtre ≈ début de l'attaque
-    nbins = max(8, int(beat_dur * sr / hop))
-    hist = np.bincount(((t % beat_dur) / beat_dur * nbins).astype(int) % nbins,
-                       weights=d, minlength=nbins)
-    hist = np.convolve(np.r_[hist[-2:], hist, hist[:2]], np.ones(3) / 3, "same")[2:-2]
-    centre = int(round(coarse / beat_dur * nbins)) % nbins
-    span = int(0.04 / beat_dur * nbins)
-    cand = (centre + np.arange(-span, span + 1)) % nbins
-    best = cand[np.argmax(hist[cand])]
-    return (best + 0.5) / nbins * beat_dur - win / sr / 2
+def grid_score(oenv, period, phases, t_from, t_to):
+    """Moyenne de l'enveloppe d'onsets sur une grille (période, phase) en trames."""
+    n0 = np.ceil((t_from - phases) / period).clip(0)
+    k = np.arange(int((t_to - t_from) / period) + 2)
+    idx = phases[:, None] + (n0[:, None] + k[None, :]) * period
+    idx = np.where(idx < t_to, idx, np.nan)
+    vals = np.where(np.isnan(idx), np.nan,
+                    oenv[np.nan_to_num(idx).round().astype(int).clip(0, len(oenv) - 1)])
+    return np.nanmean(vals, axis=1)
 
 
-def analyse_grid(y: np.ndarray, sr: int, beats_per_measure: int,
-                 bpm: Optional[float], log: Logger):
-    """Estime un tempo fixe et la position de la première mesure.
+def detect_tempo(mono, sr, bpm_hint=None, snap=True, fixed=False):
+    hop = sr // 200                                   # trames de 5 ms
+    fps = sr / hop
+    oenv = librosa.onset.onset_strength(y=mono, sr=sr, hop_length=hop, n_fft=2048)
+    oenv = oenv / (oenv.max() + 1e-12)
+    a, b = int(0.05 * len(oenv)), int(0.95 * len(oenv))   # ignore les bords
 
-    Renvoie (bpm, t0) où t0 est l'instant (s) du premier temps fort.
-    La grille est supposée strictement régulière (tempo fixe, type DAW/bounce).
-    """
-    mono = y.mean(axis=1).astype(np.float32)
-    hop = 256
-    onset_env = librosa.onset.onset_strength(y=mono, sr=sr, hop_length=hop)
+    if bpm_hint is None:
+        y22 = librosa.resample(mono, orig_sr=sr, target_sr=22050)
+        bpm_hint = float(np.atleast_1d(librosa.beat.beat_track(y=y22, sr=22050)[0])[0])
 
-    tempo_est, beats = librosa.beat.beat_track(
-        onset_envelope=onset_env, sr=sr, hop_length=hop,
-        start_bpm=bpm or 120.0, units="time", tightness=400)
-    tempo_est = float(np.atleast_1d(tempo_est)[0])
+    def search(bpms, step):
+        best = (-1, None, None)
+        for bpm in bpms:
+            period = 60 / bpm * fps
+            ph = np.arange(0, period, step)
+            s = grid_score(oenv, period, ph, a, b)
+            i = int(np.argmax(s))
+            if s[i] > best[0]:
+                best = (s[i], bpm, ph[i])
+        return best
 
-    if bpm is None:
-        if len(beats) >= 8:
-            # régression linéaire sur les temps détectés : tempo fixe le plus
-            # cohérent avec l'ensemble du morceau
-            k = np.arange(len(beats))
-            slope, _ = np.polyfit(k, beats, 1)
-            bpm = 60.0 / slope
-        else:
-            bpm = tempo_est
-        # arrondi au 1/100 de BPM si on en est très proche (tempos de DAW)
-        if abs(bpm - round(bpm, 2)) < 0.005:
-            bpm = round(bpm, 2)
-        if abs(bpm - round(bpm)) < 0.05:
-            bpm = float(round(bpm))
-        log(f"Tempo détecté : {bpm:.2f} BPM")
+    if fixed:
+        bpm = bpm_hint
     else:
-        log(f"Tempo imposé : {bpm:.2f} BPM")
+        _, bpm, _ = search(np.arange(bpm_hint * 0.95, bpm_hint * 1.05, 0.05), 0.5)
+        _, bpm, _ = search(np.arange(bpm - 0.06, bpm + 0.06, 0.002), 0.5)
+    if snap and not fixed and abs(bpm - round(bpm)) < 0.05:
+        bpm = float(round(bpm))
+    period = 60 / bpm * fps
+    ph = np.arange(0, period, 0.1)
+    phase = ph[int(np.argmax(grid_score(oenv, period, ph, a, b)))]
+    beat0 = phase / fps                               # premier temps (s), < 1 temps
 
-    beat_dur = 60.0 / bpm
-    # phase de la grille des temps : moyenne circulaire des temps détectés
-    if len(beats):
-        phases = (beats % beat_dur) / beat_dur * 2 * np.pi
-        phase = (np.angle(np.mean(np.exp(1j * phases))) % (2 * np.pi)) / (2 * np.pi) * beat_dur
-    else:
-        phase = 0.0
-    phase = _refine_phase(mono, sr, beat_dur, phase)
-
-    # quel temps de la mesure est le temps fort ? on cherche le décalage qui
-    # maximise l'énergie des attaques dans le grave (grosse caisse, basse)
-    S = np.abs(librosa.stft(mono, n_fft=2048, hop_length=hop))
-    freqs = librosa.fft_frequencies(sr=sr, n_fft=2048)
-    low = librosa.onset.onset_strength(S=librosa.amplitude_to_db(S[freqs < 200]), sr=sr, hop_length=hop)
-    full = onset_env / (onset_env.max() + 1e-12)
-    low = low / (low.max() + 1e-12)
-    strength = 0.6 * low + 0.4 * full[: len(low)]
-    times = librosa.frames_to_time(np.arange(len(strength)), sr=sr, hop_length=hop)
-    duration = len(mono) / sr
-
-    best, best_score = 0, -np.inf
-    for off in range(beats_per_measure):
-        t = phase + off * beat_dur
-        bar_times = np.arange(t, duration, beat_dur * beats_per_measure)
-        idx = np.searchsorted(times, bar_times).clip(0, len(strength) - 1)
-        score = strength[idx].mean() if len(idx) else -np.inf
-        if score > best_score:
-            best, best_score = off, score
-    t0 = phase + best * beat_dur
-    measure_dur = beat_dur * beats_per_measure
-    # première mesure complète : on recule tant qu'on reste ≥ 0
-    t0 = t0 % measure_dur
-    log(f"Première mesure à {t0 * 1000:.1f} ms (mesure = {measure_dur:.4f} s)")
-    return bpm, t0
+    # dérive : décalage de phase optimal par fenêtres de 15 s
+    drift = []
+    for t in np.arange(a / fps, b / fps - 15, 15):
+        s = grid_score(oenv, period, ph, t * fps, (t + 15) * fps)
+        d = (ph[int(np.argmax(s))] - phase + period / 2) % period - period / 2
+        drift.append(round(float(d / fps * 1000), 1))
+    return float(bpm), beat0, drift
 
 
 # --------------------------------------------------------------------------
-# Découpe / assemblage
+# Mesures (loop_slicer.py)
 # --------------------------------------------------------------------------
 
-def _apply_fades(x: np.ndarray, sr: int, fade_ms: float):
-    n = int(round(sr * fade_ms / 1000.0))
-    if n < 1 or 2 * n >= len(x):
+def detect_downbeat(mono, sr, bpm, beat0, beats_per_bar, phrase_bars):
+    """Phase du premier temps (en temps) puis phase de phrase (en mesures),
+    par la nouveauté spectrale beat-synchrone + attaques graves."""
+    B = 60 / bpm
+    hop = 480
+    S = np.abs(librosa.stft(mono, n_fft=4096, hop_length=hop))
+    fr = librosa.fft_frequencies(sr=sr, n_fft=4096)
+    tt = librosa.frames_to_time(np.arange(S.shape[1]), sr=sr, hop_length=hop)
+    nb = int((len(mono) / sr - beat0) / B)
+    bt = beat0 + np.arange(nb) * B
+    fi = np.searchsorted(tt, bt).clip(0, S.shape[1] - 1)
+
+    low = S[(fr > 30) & (fr < 120)].sum(0)
+    lowon = np.maximum(0, np.diff(low, prepend=low[0]))
+    kick = np.array([lowon[max(0, i - 2):i + 3].max() for i in fi])
+
+    P = S ** 2
+    chroma = librosa.feature.chroma_stft(S=P, sr=sr)
+    mf = librosa.feature.mfcc(S=librosa.power_to_db(librosa.feature.melspectrogram(S=P, sr=sr)), n_mfcc=13)
+    F = np.vstack([chroma, mf / 50])
+    bf = np.array([F[:, fi[i]:max(fi[i] + 1, fi[i + 1])].mean(1) for i in range(nb - 1)])
+    nov = np.r_[0, np.linalg.norm(np.diff(bf, axis=0), axis=1)]
+    kick = kick[:nb - 1]
+
+    z = lambda v: (v - v.mean()) / (v.std() + 1e-12)
+    beat_idx = np.arange(nb - 1)
+    db_scores = [z(nov)[beat_idx % beats_per_bar == p].mean()
+                 + 0.5 * z(kick)[beat_idx % beats_per_bar == p].mean()
+                 for p in range(beats_per_bar)]
+    db = int(np.argmax(db_scores))
+
+    bar_beats = np.arange(db, nb - 1, beats_per_bar)
+    bar_nov = nov[bar_beats]
+    # les plus grands changements de section (moyenne des 3 plus forts) fixent le début de phrase
+    ph_scores = [np.sort(bar_nov[np.arange(len(bar_nov)) % phrase_bars == p])[-3:].mean()
+                 for p in range(phrase_bars)]
+    pb = int(np.argmax(ph_scores))
+    return db, pb, [round(float(s), 3) for s in db_scores], [round(float(s), 3) for s in ph_scores]
+
+
+# --------------------------------------------------------------------------
+# Sélection des boucles les plus différenciées (loop_slicer.py)
+# --------------------------------------------------------------------------
+
+def segment_features(seg, sr):
+    m = seg.mean(1).astype(np.float32)
+    Sx = np.abs(librosa.stft(m, n_fft=2048, hop_length=512))
+    P = Sx ** 2
+    mel = librosa.power_to_db(librosa.feature.melspectrogram(S=P, sr=sr, n_mels=64))
+    mf = librosa.feature.mfcc(S=mel, n_mfcc=20)
+    ch = librosa.feature.chroma_stft(S=P, sr=sr).mean(1)
+    con = librosa.feature.spectral_contrast(S=Sx, sr=sr)
+    on = librosa.onset.onset_strength(S=mel, sr=sr)
+    fr = librosa.fft_frequencies(sr=sr, n_fft=2048)
+    bands = [P[(fr >= lo) & (fr < hi)].sum() for lo, hi in
+             [(20, 120), (120, 500), (500, 2000), (2000, 6000), (6000, sr / 2 + 1)]]
+    bands = 10 * np.log10(np.array(bands) / (P.sum() + 1e-12) + 1e-12)
+    side = np.sqrt(((seg[:, 0] - seg[:, 1]) ** 2).mean()
+                   / (((seg[:, 0] + seg[:, 1]) ** 2).mean() + 1e-12) + 1e-12)
+    return dict(timbre=np.r_[mf[1:].mean(1), mf[1:].std(1)],
+                harm=ch / (ch.sum() + 1e-9),
+                tex=np.r_[con.mean(1), bands, on.mean(), on.std(), side])
+
+
+def select(bars, feats, louds, nbars, n_max, min_dist, loud_floor, weights):
+    """Sélection gloutonne max-min : on part de la boucle la plus éloignée de
+    toutes les autres, puis on ajoute à chaque fois la plus éloignée de celles
+    déjà choisies, sans chevauchement (nbars), tant que la distance ≥ min_dist."""
+    def Z(k):
+        X = np.array([f[k] for f in feats])
+        X = (X - X.mean(0)) / (X.std(0) + 1e-9)
+        return X / np.sqrt(X.shape[1])
+    L = np.where(np.isfinite(louds), louds, -70.0)[:, None]
+    blocks = [Z("timbre") * weights[0], Z("harm") * weights[1], Z("tex") * weights[2],
+              (L - L.mean()) / (L.std() + 1e-9) * weights[3]]
+    X = np.hstack(blocks)
+    D = np.linalg.norm(X[:, None] - X[None], axis=2)
+    bars = np.asarray(bars)
+    valid = np.isfinite(louds) & (louds > loud_floor)
+    if not valid.any():
+        return []
+    first = int(np.argmax(np.where(valid, D.sum(1), -1)))
+    sel, dmins = [first], [np.inf]
+    while len(sel) < n_max:
+        best, bi = -1, None
+        for i in range(len(bars)):
+            if not valid[i] or i in sel or any(abs(bars[i] - bars[j]) < nbars for j in sel):
+                continue
+            d = D[i, sel].min()
+            if d > best:
+                best, bi = d, i
+        if bi is None or best < min_dist:
+            break
+        sel.append(bi)
+        dmins.append(best)
+    return list(zip(sel, dmins))
+
+
+# --------------------------------------------------------------------------
+# Conversion de format
+# --------------------------------------------------------------------------
+
+def _fade(x: np.ndarray, sr: int, fade_ms: float):
+    F = int(round(fade_ms / 1000 * sr))
+    if F <= 1 or 2 * F >= len(x):
         return x
-    ramp = np.linspace(0.0, 1.0, n, endpoint=False)[:, None]
+    ramp = 0.5 - 0.5 * np.cos(np.linspace(0, np.pi, F))   # cosinus surélevé
     x = x.copy()
-    x[:n] *= ramp
-    x[-n:] *= ramp[::-1]
+    x[:F] *= ramp[:, None]
+    x[-F:] *= ramp[::-1, None]
     return x
 
 
-def _match_channels(x: np.ndarray, ch: int):
-    if x.shape[1] == ch:
-        return x
-    if ch == 1:
-        return x.mean(axis=1, keepdims=True)
-    if x.shape[1] == 1:
-        return np.repeat(x, ch, axis=1)
-    return x[:, :ch]  # plus de 2 canaux source → on garde les 2 premiers
-
-
-def _to_output(x: np.ndarray, sr_in: int, sr_out: int, length_out: int, s: Settings):
-    x = _match_channels(x, s.channels_per_loop)
-    if sr_in != sr_out:
-        x = librosa.resample(x.T, orig_sr=sr_in, target_sr=sr_out, res_type="soxr_vhq").T
+def _to_output(x: np.ndarray, sr_in: int, length_out: int, s: Settings):
+    if s.channels_per_loop == 1:
+        x = x.mean(axis=1, keepdims=True)
+    if sr_in != s.sample_rate:
+        x = librosa.resample(x.T, orig_sr=sr_in, target_sr=s.sample_rate, res_type="soxr_vhq").T
     if len(x) < length_out:
         x = np.vstack([x, np.zeros((length_out - len(x), x.shape[1]))])
-    x = x[:length_out]
-    return _apply_fades(x, sr_out, s.fade_ms)
+    return _fade(x[:length_out], s.sample_rate, s.fade_ms)
 
 
-def slice_file(path: str, s: Settings, log: Logger) -> tuple[List[Loop], dict]:
+def _slots(s: Settings, available: int) -> int:
+    return s.n_tracks // s.channels_per_loop if s.n_tracks > 0 else available
+
+
+# --------------------------------------------------------------------------
+# Mode découpage
+# --------------------------------------------------------------------------
+
+def slice_file(path: str, s: Settings, log: Logger, progress: Progress):
     y, sr = load_audio(path)
-    log(f"Lecture : {os.path.basename(path)} — {y.shape[1]} canal(aux), {sr} Hz, "
-        f"{len(y) / sr:.2f} s")
-    bpm, t0 = analyse_grid(y, sr, s.beats_per_measure, s.bpm, log)
+    mono = y.mean(1).astype(np.float32)
+    log(f"Lecture : {os.path.basename(path)} — {sr} Hz, {len(y) / sr:.2f} s")
 
-    measure_samples = 60.0 / bpm * s.beats_per_measure * sr          # flottant
-    loop_samples_in = int(round(measure_samples * s.measures_per_loop))
-    loop_seconds = measure_samples * s.measures_per_loop / sr
-    loop_samples_out = int(round(loop_seconds * s.sample_rate))
+    log("Analyse du tempo…")
+    bpm, beat0, drift = detect_tempo(mono, sr, bpm_hint=s.bpm, snap=s.snap_bpm,
+                                     fixed=s.bpm is not None)
+    beat0 += s.beat_offset_ms / 1000
+    B = 60 / bpm
+    BAR = s.beats_per_measure * B
+    log(f"  tempo {bpm:.3f} BPM{' (imposé)' if s.bpm else ''}, premier temps à {beat0:.4f} s")
+    if drift:
+        log(f"  écart de la grille par fenêtres de 15 s (ms) : {drift}")
+        if max(abs(d) for d in (drift[1:-1] or drift)) > 25:
+            log("  ATTENTION : écarts importants, le tempo n'est peut-être pas constant.")
+    progress(0.15)
 
-    loops = []
-    k = 0
+    log("Recherche du premier temps de mesure…")
+    db, pb, db_scores, ph_scores = detect_downbeat(mono, sr, bpm, beat0,
+                                                   s.beats_per_measure, s.phrase_bars)
+    db = (db + s.downbeat_shift) % s.beats_per_measure
+    pb = (pb + s.phrase_shift) % s.phrase_bars
+    T0 = (beat0 + db * B + pb * BAR) % (s.phrase_bars * BAR)
+    log(f"  scores par temps {db_scores} -> temps {db} ; scores de phrase {ph_scores} -> mesure {pb}")
+    log(f"  mesure 1 à {T0:.4f} s, une mesure = {BAR:.4f} s")
+    progress(0.25)
+
+    nbars = s.measures_per_loop
+    L = int(round(nbars * BAR * sr))
+    pre = int(round(s.preroll_ms / 1000 * sr))
+    cands, n = [], 0
     while True:
-        start = int(round(t0 * sr + k * s.measures_per_loop * measure_samples))
-        if start + loop_samples_in > len(y):
+        st = int(round((T0 + n * BAR) * sr)) - pre
+        if st + L > len(y):
             break
-        seg = y[start:start + loop_samples_in]
-        loops.append(Loop(index=k + 1, source=os.path.basename(path),
-                          start_sample=start,
-                          start_measure=k * s.measures_per_loop + 1,
-                          audio=_to_output(seg, sr, s.sample_rate, loop_samples_out, s)))
-        k += 1
-    log(f"{len(loops)} boucles de {s.measures_per_loop} mesure(s) "
-        f"= {loop_seconds:.4f} s ({loop_samples_out} samples à {s.sample_rate} Hz)")
-    info = dict(mode="slice", bpm=bpm, first_measure_s=t0,
-                loop_seconds=loop_seconds, loop_samples=loop_samples_out)
+        if st >= 0 and n % s.phrase_bars == 0:
+            cands.append((n, st))
+        n += 1
+    if not cands:
+        raise ValueError(f"Morceau trop court pour des boucles de {nbars} mesure(s)")
+
+    log(f"{len(cands)} positions candidates — analyse des timbres…")
+    meter = pyln.Meter(sr)
+    feats, louds = [], []
+    for i, (_, st) in enumerate(cands):
+        seg = y[st:st + L]
+        louds.append(meter.integrated_loudness(seg))
+        feats.append(segment_features(seg, sr))
+        progress(0.25 + 0.3 * (i + 1) / len(cands))
+    louds = np.array(louds)
+
+    n_max = _slots(s, len(cands))
+    picked = select([c[0] for c in cands], feats, louds, nbars, n_max,
+                    s.min_dist, s.loud_floor, s.weights)
+    log(f"Sélection : {len(picked)} boucles différenciées (sur {n_max} demandées), "
+        f"sans chevauchement, ≥ {s.loud_floor:.0f} LUFS")
+
+    loop_seconds = nbars * BAR
+    length_out = int(round(loop_seconds * s.sample_rate))
+    loops = []
+    for order, (i, dm) in enumerate(picked, 1):
+        bar, st = cands[i]
+        loops.append(Loop(index=bar // s.phrase_bars + 1, source=os.path.basename(path),
+                          start_sample=st, start_measure=bar + 1, raw=y[st:st + L], sr_in=sr,
+                          distinct=float(dm), pick_order=order))
+    log(f"Boucles de {nbars} mesure(s) = {loop_seconds:.4f} s "
+        f"({L} samples à {sr} Hz → {length_out} à {s.sample_rate} Hz)")
+    info = dict(mode="slice", bpm=bpm, beat0_s=beat0, downbeat_beat=db, phrase_bar=pb,
+                bar1_s=T0, bar_s=BAR, drift_ms=drift, candidates=len(cands),
+                loop_seconds=loop_seconds, loop_samples=length_out)
     return loops, info
 
 
-def merge_files(paths: Sequence[str], s: Settings, log: Logger) -> tuple[List[Loop], dict]:
-    """Une boucle par fichier. Toutes sont ramenées à la longueur la plus
-    fréquente (médiane), ce qui corrige les bounces à ±1 sample. Un fichier
-    deux fois plus court que la référence est doublé (boucle répétée)."""
-    raw = []
-    for p in paths:
-        y, sr = load_audio(p)
-        raw.append((p, y, sr))
+# --------------------------------------------------------------------------
+# Mode assemblage
+# --------------------------------------------------------------------------
+
+def merge_files(paths: Sequence[str], s: Settings, log: Logger, progress: Progress):
+    """Une boucle par fichier. Toutes sont ramenées à la longueur médiane (ce qui
+    corrige les bounces à ±1 sample). Un fichier deux fois plus court que la
+    référence est doublé (boucle répétée)."""
+    raw = [(p, *load_audio(p)) for p in paths]
     secs = np.array([len(y) / sr for _, y, sr in raw])
     ref = float(np.median(secs))
     length_out = int(round(ref * s.sample_rate))
     log(f"{len(raw)} fichiers — longueur de référence {ref:.4f} s "
         f"({length_out} samples à {s.sample_rate} Hz)")
-    loops = []
+    loops, feats, louds = [], [], []
     for i, (p, y, sr) in enumerate(raw):
         d = len(y) / sr
         reps = int(round(ref / d)) if d > 0 else 1
         if reps >= 2 and abs(reps * d - ref) / ref < 0.01:
             y = np.tile(y, (reps, 1))
-            log(f"  {os.path.basename(p)} : {d:.3f} s → répété ×{reps}")
-        elif abs(d - ref) * s.sample_rate > 2:
-            log(f"  {os.path.basename(p)} : {d:.4f} s → ajusté à {ref:.4f} s")
+            log(f"  {os.path.basename(p)}: {d:.3f} s → répété ×{reps}")
+        elif abs(d - ref) * sr > 2:
+            log(f"  {os.path.basename(p)}: {d:.4f} s → ajusté à {ref:.4f} s")
         loops.append(Loop(index=i + 1, source=os.path.basename(p), start_sample=0,
-                          start_measure=float("nan"),
-                          audio=_to_output(y, sr, s.sample_rate, length_out, s)))
-    info = dict(mode="merge", loop_seconds=length_out / s.sample_rate,
-                loop_samples=length_out)
-    return loops, info
+                          start_measure=float("nan"), raw=y, sr_in=sr))
+        louds.append(pyln.Meter(sr).integrated_loudness(y))
+        feats.append(segment_features(y, sr))
+        progress(0.05 + 0.5 * (i + 1) / len(raw))
+
+    n_max = _slots(s, len(loops))
+    if len(loops) > n_max:
+        picked = select(np.arange(len(loops)), feats, np.array(louds), 0, n_max,
+                        -np.inf, s.loud_floor, s.weights)
+        log(f"{len(loops)} fichiers pour {n_max} emplacements : on garde les {len(picked)} plus différenciés")
+    else:
+        picked = [(i, np.nan) for i in range(len(loops))]
+    chosen = []
+    for order, (i, dm) in enumerate(picked, 1):
+        loops[i].distinct, loops[i].pick_order = float(dm), order
+        chosen.append(loops[i])
+    info = dict(mode="merge", loop_seconds=length_out / s.sample_rate, loop_samples=length_out)
+    return chosen, info
 
 
 # --------------------------------------------------------------------------
-# Descripteurs
+# Descripteurs de classement
 # --------------------------------------------------------------------------
 
 def _z(v):
@@ -301,111 +456,91 @@ def _z(v):
     return (v - v.mean()) / sd if sd > 1e-12 else np.zeros_like(v)
 
 
-def compute_features(loops: List[Loop], sr: int, log: Logger, progress: Progress):
+def compute_features(loops: List[Loop], sr: int, progress: Progress):
     meter = pyln.Meter(sr)
     for i, L in enumerate(loops):
         x = L.audio
         mono = x.mean(axis=1).astype(np.float32)
         f = {}
         try:
-            lufs = meter.integrated_loudness(x if x.shape[1] <= 5 else mono)
+            lufs = meter.integrated_loudness(x)
         except Exception:
             lufs = -np.inf
         f["loudness"] = float(lufs) if np.isfinite(lufs) else -100.0
         rms = np.sqrt(np.mean(x ** 2))
         f["energy"] = float(20 * np.log10(rms + 1e-12))
-
         if rms < 1e-7:
             f.update(brightness=0.0, harmonicity=0.0, onset_rate=0.0,
                      impulsivity=0.0, percussive_ratio=0.0, fluctuation=0.0)
         else:
             S = np.abs(librosa.stft(mono, n_fft=2048, hop_length=512))
             f["brightness"] = float(np.average(
-                librosa.feature.spectral_centroid(S=S, sr=sr)[0],
-                weights=S.sum(axis=0) + 1e-12))
+                librosa.feature.spectral_centroid(S=S, sr=sr)[0], weights=S.sum(axis=0) + 1e-12))
             H, P = librosa.decompose.hpss(S)
             eh, ep = float((H ** 2).sum()), float((P ** 2).sum())
             flat = float(np.median(librosa.feature.spectral_flatness(S=S)))
-            # harmonicité : part harmonique, pénalisée par la platitude spectrale
             f["harmonicity"] = float(eh / (eh + ep + 1e-12) * (1 - flat))
-            # activité rythmique : 4 composantes
             env = librosa.onset.onset_strength(S=librosa.amplitude_to_db(S, ref=np.max), sr=sr)
             onsets = librosa.onset.onset_detect(onset_envelope=env, sr=sr, units="time")
-            dur = len(mono) / sr
-            f["onset_rate"] = float(len(onsets) / dur)                      # attaques / s
+            f["onset_rate"] = float(len(onsets) / (len(mono) / sr))
             f["impulsivity"] = float(np.percentile(env, 95) / (np.median(env) + 1e-6))
             f["percussive_ratio"] = float(ep / (eh + ep + 1e-12))
             frame_rms = librosa.feature.rms(y=mono, frame_length=1024, hop_length=256)[0]
             f["fluctuation"] = float(np.std(frame_rms) / (np.mean(frame_rms) + 1e-12))
-        f["position"] = float(L.index)
+        f["position"] = float(L.start_sample if np.isfinite(L.start_measure) else L.index)
+        f["distinctiveness"] = float(L.pick_order)
         L.features = f
         progress((i + 1) / len(loops))
-
-    # indice d'activité = moyenne des 4 composantes centrées-réduites
+    # activité rythmique = moyenne des 4 composantes centrées-réduites
     comp = [_z([L.features[k] for L in loops])
             for k in ("onset_rate", "impulsivity", "percussive_ratio", "fluctuation")]
-    act = np.mean(comp, axis=0)
-    for L, a in zip(loops, act):
+    for L, a in zip(loops, np.mean(comp, axis=0)):
         L.features["activity"] = float(a)
 
 
 # --------------------------------------------------------------------------
-# Sélection, classement, écriture
+# Écriture
 # --------------------------------------------------------------------------
 
-def order_and_select(loops: List[Loop], s: Settings, log: Logger) -> List[Loop]:
-    kept = [L for L in loops if L.features["loudness"] > s.skip_silent_db]
-    if len(kept) < len(loops):
-        log(f"{len(loops) - len(kept)} boucle(s) silencieuse(s) ignorée(s) "
-            f"(< {s.skip_silent_db:.0f} LUFS)")
-    ranked = sorted(kept, key=lambda L: L.features[s.descriptor], reverse=not s.ascending)
-
-    if s.n_tracks > 0:
-        slots = s.n_tracks // s.channels_per_loop
-        if s.n_tracks % s.channels_per_loop:
-            log(f"Attention : {s.n_tracks} pistes n'est pas un multiple de "
-                f"{s.channels_per_loop} — {slots} boucles utilisées")
-        if len(ranked) > slots:
-            # on garde des boucles réparties régulièrement sur tout l'éventail
-            # du descripteur (de la plus faible à la plus forte)
-            pick = np.unique(np.round(np.linspace(0, len(ranked) - 1, slots)).astype(int))
-            log(f"{len(ranked)} boucles disponibles pour {slots} emplacements : "
-                f"sélection répartie sur toute l'échelle du descripteur")
-            ranked = [ranked[i] for i in pick]
-        elif len(ranked) < slots:
-            log(f"Seulement {len(ranked)} boucles pour {slots} emplacements : "
-                f"les {slots - len(ranked)} derniers seront silencieux")
-    return ranked
+FEATURE_KEYS = ["loudness", "energy", "brightness", "harmonicity", "activity",
+                "onset_rate", "impulsivity", "percussive_ratio", "fluctuation"]
 
 
 def write_output(ranked: List[Loop], info: dict, src_paths: Sequence[str],
                  s: Settings, log: Logger) -> dict:
-    out_dir = s.output_dir or os.path.dirname(os.path.abspath(src_paths[0]))
+    src0 = os.path.abspath(src_paths[0])
+    if len(src_paths) == 1:
+        stem = os.path.splitext(os.path.basename(src0))[0]
+    else:
+        stem = os.path.basename(os.path.dirname(src0)) or "merge"
+    out_dir = os.path.expanduser(s.output_dir or os.path.join(os.path.dirname(src0), stem + "_Loops"))
     os.makedirs(out_dir, exist_ok=True)
 
-    n_loops = len(ranked)
-    slots = (s.n_tracks // s.channels_per_loop) if s.n_tracks > 0 else n_loops
-    n_ch = slots * s.channels_per_loop
+    cpl = s.channels_per_loop
+    slots = _slots(s, len(ranked))
+    if s.n_tracks > 0 and s.n_tracks % cpl:
+        log(f"Remarque : {s.n_tracks} pistes n'est pas un multiple de {cpl} — {slots} boucles")
+    if len(ranked) < slots:
+        log(f"Seulement {len(ranked)} boucles différenciées pour {slots} emplacements : "
+            f"les {slots - len(ranked)} derniers seront silencieux "
+            f"(baissez la distinctivité minimale pour en obtenir plus)")
+    n_ch = slots * cpl
     length = info["loop_samples"]
-
     data = np.zeros((length, n_ch), dtype=np.float32)
     for i, L in enumerate(ranked):
-        data[:, i * s.channels_per_loop:(i + 1) * s.channels_per_loop] = L.audio
+        data[:, i * cpl:(i + 1) * cpl] = L.audio
 
-    peak = float(np.abs(data).max()) if data.size else 0.0
     subtype = SUBTYPES[s.subtype_label]
+    peak = float(np.abs(data).max()) if data.size else 0.0
     if peak > 1.0 and subtype != "FLOAT":
         log(f"Attention : crête à {20 * np.log10(peak):+.2f} dBFS — écrêtage en "
             f"format entier. Utilisez 32 bit float ou baissez le niveau source.")
 
-    base = os.path.splitext(os.path.basename(src_paths[0]))[0]
-    if len(src_paths) > 1:
-        base = os.path.basename(os.path.dirname(os.path.abspath(src_paths[0]))) or "merge"
     sens = "up" if s.ascending else "down"
-    name = f"{base}_{n_ch}ch_{s.descriptor}_{sens}"
+    mes = f"{s.measures_per_loop}mes_" if info["mode"] == "slice" else ""
+    name = f"{stem}_{mes}{len(ranked)}boucles_{n_ch}ch_{s.descriptor}_{sens}"
     ext = ".wav" if s.file_format == "WAV" else ".aif"
     audio_path = os.path.join(out_dir, name + ext)
-
     fmt = s.file_format
     bytes_per = {"PCM_16": 2, "PCM_24": 3, "PCM_32": 4, "FLOAT": 4}[subtype]
     if fmt == "WAV" and length * n_ch * bytes_per > 4_000_000_000:
@@ -413,33 +548,48 @@ def write_output(ranked: List[Loop], info: dict, src_paths: Sequence[str],
         log("Fichier > 4 Go : écriture au format RF64")
     sf.write(audio_path, data, s.sample_rate, subtype=subtype, format=fmt)
 
-    # index CSV
+    # un fichier par boucle (optionnel), nommé comme dans loop_slicer.py
+    loop_names = []
+    if s.export_individual:
+        d = os.path.join(out_dir, name)
+        os.makedirs(d, exist_ok=True)
+        for k, L in enumerate(ranked, 1):
+            tag = f"mes{int(L.start_measure):03d}" if np.isfinite(L.start_measure) \
+                else os.path.splitext(L.source)[0]
+            nm = f"{k:02d}_{L.features['loudness']:+.1f}LUFS_{tag}{ext}"
+            sf.write(os.path.join(d, nm), L.audio.astype(np.float32), s.sample_rate,
+                     subtype=subtype, format=s.file_format)
+            loop_names.append(nm)
+        log(f"  + {len(ranked)} boucles séparées dans {name}/")
+
     csv_path = os.path.join(out_dir, name + "_index.csv")
-    keys = ["loudness", "energy", "brightness", "harmonicity", "activity",
-            "onset_rate", "impulsivity", "percussive_ratio", "fluctuation"]
     with open(csv_path, "w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
-        w.writerow(["rang", "canaux", "source", "position_origine", "mesure_debut",
-                    "sample_debut_source", *keys])
+        w.writerow(["rang", "canaux", "source", "mesure_debut", "debut_s",
+                    "debut_echantillon", "distinctivite", "ordre_selection", *FEATURE_KEYS]
+                   + (["fichier"] if loop_names else []))
         for i, L in enumerate(ranked):
-            c0 = i * s.channels_per_loop + 1
-            chans = f"{c0}-{c0 + s.channels_per_loop - 1}" if s.channels_per_loop > 1 else str(c0)
-            w.writerow([i + 1, chans, L.source, L.index,
-                        "" if np.isnan(L.start_measure) else int(L.start_measure),
-                        L.start_sample,
-                        *[f"{L.features.get(k, float('nan')):.4f}" for k in keys]])
+            c0 = i * cpl + 1
+            chans = f"{c0}-{c0 + cpl - 1}" if cpl > 1 else str(c0)
+            w.writerow([i + 1, chans, L.source,
+                        int(L.start_measure) if np.isfinite(L.start_measure) else "",
+                        f"{L.start_sample / L.sr_in:.4f}", L.start_sample,
+                        "" if not np.isfinite(L.distinct) else round(L.distinct, 2),
+                        L.pick_order,
+                        *[f"{L.features.get(k, float('nan')):.4f}" for k in FEATURE_KEYS]]
+                       + ([loop_names[i]] if loop_names else []))
 
-    meta = dict(source=[os.path.basename(p) for p in src_paths], **info,
+    meta = dict(source=[os.path.abspath(p) for p in src_paths], **info,
                 settings={k: v for k, v in asdict(s).items() if k != "output_dir"},
-                channels=n_ch, loops=n_loops, sample_rate=s.sample_rate,
-                subtype=subtype, peak_dbfs=20 * np.log10(peak + 1e-12))
-    with open(os.path.join(out_dir, name + "_meta.json"), "w", encoding="utf-8") as fh:
-        json.dump(meta, fh, indent=2, ensure_ascii=False)
+                channels=n_ch, loops=len(ranked), sample_rate=s.sample_rate,
+                subtype=subtype, peak_dbfs=round(20 * np.log10(peak + 1e-12), 2))
+    with open(os.path.join(out_dir, name + "_analyse.json"), "w", encoding="utf-8") as fh:
+        json.dump(meta, fh, indent=2, ensure_ascii=False, default=float)
 
     log(f"✔ {os.path.basename(audio_path)} — {n_ch} canaux, "
-        f"{length / s.sample_rate:.3f} s, {s.sample_rate} Hz, {s.subtype_label}")
+        f"{length / s.sample_rate:.4f} s, {s.sample_rate} Hz, {s.subtype_label}")
     log(f"  Dossier : {out_dir}")
-    return dict(audio=audio_path, csv=csv_path, channels=n_ch)
+    return dict(audio=audio_path, csv=csv_path, channels=n_ch, out_dir=out_dir)
 
 
 def run(paths: Sequence[str], s: Settings,
@@ -450,18 +600,19 @@ def run(paths: Sequence[str], s: Settings,
         raise ValueError("Aucun fichier audio")
     progress(0.02)
     if len(paths) == 1:
-        loops, info = slice_file(paths[0], s, log)
+        loops, info = slice_file(paths[0], s, log, progress)
     else:
-        loops, info = merge_files(paths, s, log)
+        loops, info = merge_files(paths, s, log, progress)
     if not loops:
-        raise ValueError("Aucune boucle complète : fichier trop court pour "
-                         f"{s.measures_per_loop} mesure(s) ?")
-    progress(0.3)
-    log("Calcul des descripteurs…")
-    compute_features(loops, s.sample_rate, log, lambda p: progress(0.3 + 0.6 * p))
-    ranked = order_and_select(loops, s, log)
-    label = DESCRIPTORS[s.descriptor][0]
-    log(f"Classement : {label}, {'croissant (up)' if s.ascending else 'décroissant (down)'}")
+        raise ValueError("Aucune boucle exploitable (toutes trop faibles ?)")
+    for L in loops:
+        L.audio = _to_output(L.raw, L.sr_in, info["loop_samples"], s)
+    progress(0.6)
+    log("Calcul des descripteurs de classement…")
+    compute_features(loops, s.sample_rate, lambda p: progress(0.6 + 0.3 * p))
+    ranked = sorted(loops, key=lambda L: L.features[s.descriptor], reverse=not s.ascending)
+    log(f"Classement : {DESCRIPTORS[s.descriptor][0]}, "
+        f"{'croissant (up)' if s.ascending else 'décroissant (down)'}")
     result = write_output(ranked, info, paths, s, log)
     progress(1.0)
     return result

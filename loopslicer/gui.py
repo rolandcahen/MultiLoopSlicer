@@ -154,11 +154,46 @@ class MainWindow(QWidget):
         f.addRow("Format", fmt_row)
         dir_row = QHBoxLayout()
         self.out_dir = QLineEdit()
-        self.out_dir.setPlaceholderText("même dossier que le fichier source")
+        self.out_dir.setPlaceholderText("<nom du fichier>_Loops, à côté du fichier source")
         b = QPushButton("Choisir…"); b.clicked.connect(self.choose_dir)
         dir_row.addWidget(self.out_dir); dir_row.addWidget(b)
         f.addRow("Dossier", dir_row)
         root.addWidget(g_out)
+
+        # --- réglages avancés (repliables) ---------------------------------
+        self.adv = QGroupBox("Réglages avancés")
+        self.adv.setCheckable(True)
+        self.adv.setChecked(False)
+        f = QFormLayout()
+        self.phrase = QSpinBox(); self.phrase.setRange(1, 16); self.phrase.setValue(2)
+        self.phrase.setToolTip("Les boucles ne démarrent que toutes les N mesures")
+        f.addRow("Grille de phrase (mesures)", self.phrase)
+        self.db_shift = QSpinBox(); self.db_shift.setRange(-15, 15)
+        self.db_shift.setToolTip("Si la boucle ne démarre pas sur le premier temps")
+        f.addRow("Correction du 1er temps (temps)", self.db_shift)
+        self.ph_shift = QSpinBox(); self.ph_shift.setRange(-15, 15)
+        f.addRow("Correction de phrase (mesures)", self.ph_shift)
+        self.offset = QDoubleSpinBox(); self.offset.setRange(-500, 500); self.offset.setSuffix(" ms")
+        self.offset.setToolTip("Décale toute la grille (si les attaques sont coupées ou en retard)")
+        f.addRow("Décalage fin de la grille", self.offset)
+        self.preroll = QDoubleSpinBox(); self.preroll.setRange(0, 200); self.preroll.setSuffix(" ms")
+        f.addRow("Pré-roll", self.preroll)
+        self.fade = QDoubleSpinBox(); self.fade.setRange(0, 50); self.fade.setValue(1); self.fade.setSuffix(" ms")
+        f.addRow("Micro-fondus anti-clic", self.fade)
+        self.min_dist = QDoubleSpinBox(); self.min_dist.setRange(0, 10); self.min_dist.setSingleStep(0.1)
+        self.min_dist.setValue(0.5)
+        self.min_dist.setToolTip("Plus haut = moins de boucles mais plus différentes ; 0 = autant que possible")
+        f.addRow("Distinctivité minimale", self.min_dist)
+        self.floor = QDoubleSpinBox(); self.floor.setRange(-90, 0); self.floor.setValue(-45)
+        self.floor.setSuffix(" LUFS")
+        f.addRow("Ignorer en dessous de", self.floor)
+        self.individual = QCheckBox("Exporter aussi chaque boucle dans un fichier séparé")
+        f.addRow(self.individual)
+        inner = QWidget(); inner.setLayout(f)
+        lay = QVBoxLayout(self.adv); lay.addWidget(inner)
+        inner.setVisible(False)
+        self.adv.toggled.connect(inner.setVisible)
+        root.addWidget(self.adv)
 
         # --- action ---------------------------------------------------------
         self.go = QPushButton("Générer le fichier multicanal")
@@ -186,6 +221,10 @@ class MainWindow(QWidget):
         self.beats.setValue(int(p.value("beats", 4)))
         self.tracks.setValue(int(p.value("tracks", 64)))
         self.out_dir.setText(p.value("out_dir", ""))
+        self.phrase.setValue(int(p.value("phrase", 2)))
+        self.min_dist.setValue(float(p.value("min_dist", 0.5)))
+        self.floor.setValue(float(p.value("floor", -45)))
+        self.individual.setChecked(p.value("individual", "false") in (True, "true"))
 
     def save_prefs(self):
         p = self.prefs
@@ -194,6 +233,10 @@ class MainWindow(QWidget):
         p.setValue("beats", self.beats.value())
         p.setValue("tracks", self.tracks.value())
         p.setValue("out_dir", self.out_dir.text())
+        p.setValue("phrase", self.phrase.value())
+        p.setValue("min_dist", self.min_dist.value())
+        p.setValue("floor", self.floor.value())
+        p.setValue("individual", self.individual.isChecked())
 
     def choose_dir(self):
         d = QFileDialog.getExistingDirectory(self, "Dossier de sortie", self.out_dir.text())
@@ -226,6 +269,15 @@ class MainWindow(QWidget):
             sample_rate=int(self.sr.currentText()),
             subtype_label=self.depth.currentText(),
             output_dir=self.out_dir.text().strip() or None,
+            phrase_bars=self.phrase.value(),
+            downbeat_shift=self.db_shift.value(),
+            phrase_shift=self.ph_shift.value(),
+            beat_offset_ms=self.offset.value(),
+            preroll_ms=self.preroll.value(),
+            fade_ms=self.fade.value(),
+            min_dist=self.min_dist.value(),
+            loud_floor=self.floor.value(),
+            export_individual=self.individual.isChecked(),
         )
 
     def start(self):

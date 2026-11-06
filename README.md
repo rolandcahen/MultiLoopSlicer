@@ -1,141 +1,165 @@
 # MultiLoop Slicer
 
-Small standalone application for **interactive sound design**: it cuts an audio piece into loops of equal length aligned to the measure grid, **sorts them by a sound descriptor** (loudness, energy, brightness, harmonicity, rhythmic activity…) and writes **a single multichannel file** (loop 1 → channels 1-2, loop 2 → channels 3-4, …).
+Petite application autonome pour le **design sonore interactif** : elle découpe un morceau audio en boucles synchrones de même longueur calées sur les mesures, **choisit les plus différenciées**, les **classe selon un descripteur sonore** (sonie, énergie, brillance, harmonicité, activité rythmique…) et écrit **un seul fichier multicanal** (boucle 1 → canaux 1-2, boucle 2 → canaux 3-4, …).
 
-The file can then be played with the Max for Live device **`MultiChannelLoop-Browser_03.amxd`** (in the `max/` folder), which lets you move continuously from one loop to the next, for example from calmest to most active, according to a control parameter (gesture, sensor, interaction…).
+Toutes les boucles ont exactement la même longueur en échantillons et commencent sur un premier temps de la même grille de phrases : elles peuvent être permutées ou mixées à tout moment.
+
+Le fichier se joue ensuite avec l'objet Max for Live **`MultiChannelLoop-Browser_03.amxd`** (dossier `max/`), qui permet de passer continûment d'une boucle à l'autre, par exemple de la plus calme à la plus active, en fonction d'un paramètre de contrôle (geste, capteur, interaction…).
+
+![Interface](docs/interface.png)
 
 ---
 
-## User guide
+## Notice d'utilisation
 
-### 1. Install (once)
+### 1. Installer (une seule fois)
 
-You need **Python 3.10 or later** ([python.org](https://www.python.org/downloads/)) and an internet connection the first time.
+Il faut **Python 3.10 ou plus récent** ([python.org](https://www.python.org/downloads/)) et une connexion internet la première fois.
 
-1. Download this repository (green **Code → Download ZIP** button) and unzip it.
-2. Double-click **`MultiLoop Slicer.command`**.
-   - The first time, macOS may block the file: **right-click → Open**, then confirm.
-   - The first launch installs what is needed (a few minutes). Later launches are immediate.
+1. Téléchargez ce dépôt (bouton vert **Code → Download ZIP**) et décompressez-le.
+2. Double-cliquez sur **`MultiLoop Slicer.command`**.
+   - La première fois, macOS peut bloquer le fichier : **clic droit → Ouvrir**, puis confirmer.
+   - Le premier lancement installe ce qu'il faut (quelques minutes). Les suivants sont immédiats.
 
-> Without the launcher (Linux, Windows or Terminal):
+> Sans le lanceur (Linux, Windows ou Terminal) :
 > ```bash
 > python3 -m venv .venv
-> .venv/bin/pip install -r requirements.txt     # Windows: .venv\Scripts\pip
+> .venv/bin/pip install -r requirements.txt     # Windows : .venv\Scripts\pip
 > .venv/bin/python -m loopslicer
 > ```
 
-### 2. Use
+### 2. Utiliser
 
-1. **Drag and drop** an audio file (wav, aiff, flac, mp3) onto the dotted area, or click it to browse.
-   - **One file** → *slice* mode: the piece is cut into loops.
-   - **Several files, or a folder** → *merge* mode: each file is one loop (for example bounces from Logic or Live).
-2. **Slicing**: number of **measures per loop** (2 by default), **beats per measure** (4), **tempo** detected automatically, or entered by hand if detection goes wrong.
-3. **Sorting**: choose the **descriptor** and the **direction**:
-   - **↑ Up**: from the weakest value to the strongest (channels 1-2 = the softest, calmest, darkest… loop),
-   - **↓ Down**: the reverse.
-4. **Output file**:
-   - **Number of tracks** = number of channels in the file (64 by default, so 32 stereo loops). With *auto*, all loops are kept.
-   - **Loops**: stereo (2 tracks per loop) or mono (1 track).
-   - **Format**: WAV or AIFF, sample rate, bit depth. **Default: WAV 48 kHz 32-bit float.**
-   - **Folder**: where to write the files (by default, next to the source file). The application remembers your settings from one session to the next.
-5. Click **Generate**. At the end, the file is shown in the Finder.
+1. **Glissez-déposez** un fichier audio (wav, aiff, flac, mp3) sur la zone en pointillés, ou cliquez dessus pour parcourir.
+   - **Un fichier** → mode *découpage* : le morceau est découpé en boucles.
+   - **Plusieurs fichiers, ou un dossier** → mode *assemblage* : chaque fichier est une boucle (par exemple des bounces de Logic ou de Live).
+2. **Découpage** : nombre de **mesures par boucle** (2 par défaut), **temps par mesure** (4), **tempo** détecté automatiquement, ou saisi à la main si la détection se trompe.
+3. **Classement** : choisissez le **descripteur** et le **sens** :
+   - **↑ Up** : de la valeur la plus faible à la plus forte (canaux 1-2 = la boucle la plus douce, la plus calme, la plus sombre…),
+   - **↓ Down** : l'inverse.
+4. **Fichier de sortie** :
+   - **Nombre de pistes** = nombre de canaux du fichier (64 par défaut, soit 32 boucles stéréo au maximum). En *auto*, toutes les boucles retenues par la sélection sont gardées. S'il y a moins de boucles différenciées que d'emplacements, les derniers canaux restent silencieux : baissez la *distinctivité minimale* (réglages avancés) pour en obtenir plus.
+   - **Boucles** : stéréo (2 pistes par boucle) ou mono (1 piste).
+   - **Format** : WAV ou AIFF, fréquence d'échantillonnage, résolution. **Par défaut : WAV 48 kHz 32 bits flottants.**
+   - **Dossier** : où écrire les fichiers (par défaut, un dossier `<nom du fichier>_Loops` à côté du fichier source). L'application mémorise vos réglages d'une fois sur l'autre.
+5. Cliquez **Générer**. À la fin, le fichier est montré dans le Finder. Le journal en bas de la fenêtre indique le tempo trouvé, la position de la mesure 1 et les éventuels avertissements.
 
-### 3. What you get
+### 3. Réglages avancés (cochez la case pour les afficher)
 
-For a source `piece.wav` sorted by activity, in rising order, on 64 tracks:
+À utiliser si l'écoute révèle un problème de calage ou de sélection :
 
-| File | Contents |
+| Réglage | Quand s'en servir |
 |---|---|
-| `piece_64ch_activity_up.wav` | the multichannel file to load into the Max for Live device |
-| `piece_64ch_activity_up_index.csv` | one row per loop: rank, channels, original position, starting measure, exact sample in the source, values of every descriptor |
-| `piece_64ch_activity_up_meta.json` | detected tempo, loop length, settings used |
+| **Grille de phrase** (2) | les boucles ne démarrent que toutes les N mesures, pour respecter le phrasé (4 ou 8 pour une musique en carrures de 4 ou 8 mesures) |
+| **Correction du 1er temps** | la boucle démarre sur le 2e, 3e ou 4e temps au lieu du 1er : indiquez le décalage en temps (+1, −1…) |
+| **Correction de phrase** | la boucle démarre au milieu d'une phrase : décalez d'une mesure |
+| **Décalage fin de la grille** | les attaques sont coupées (valeur négative) ou arrivent en retard (positive), en ms |
+| **Pré-roll** | démarre chaque boucle quelques ms avant le temps pour garder l'attaque entière |
+| **Micro-fondus** (1 ms) | fondus anti-clic en cosinus aux deux extrémités ; 0 = coupe franche |
+| **Distinctivité minimale** (0,5) | plus haut = moins de boucles mais plus différentes ; 0 = autant que possible |
+| **Ignorer en dessous de** (−45 LUFS) | écarte les passages trop faibles (silences, fins de morceau) |
+| **Exporter chaque boucle** | écrit aussi un fichier par boucle, dans un sous-dossier |
 
-The CSV opens in Excel / Numbers. It lets you find which passage of the piece each pair of channels comes from.
+### 4. Ce qu'on obtient
 
-### 4. Play with Ableton Live
+Pour une source `morceau.wav`, boucles de 2 mesures, 32 boucles retenues, classées par activité en sens croissant, sur 64 pistes :
 
-1. Put **`max/MultiChannelLoop-Browser_03.amxd`** on an audio track in Live.
-2. Load the generated multichannel file into it.
-3. Since the channels are sorted by descriptor, browsing the loops with the device means travelling through the sound along that descriptor: from the softest to the loudest, from the calmest to the most active, etc.
+| Fichier | Contenu |
+|---|---|
+| `morceau_2mes_32boucles_64ch_activity_up.wav` | le fichier multicanal à charger dans l'objet Max for Live |
+| `…_index.csv` | une ligne par boucle : rang, canaux, mesure de départ, instant et sample exact dans la source, distinctivité, valeurs de tous les descripteurs |
+| `…_analyse.json` | tempo, premier temps, mesure 1, écarts de grille, réglages utilisés |
+| `…/` (option) | un fichier par boucle, nommé par exemple `01_-23.4LUFS_mes017.wav` |
 
-<!-- TODO: describe the device's controls here (parameters, MIDI / OSC mapping). -->
+Le CSV s'ouvre dans Excel ou Numbers : il permet de retrouver de quel passage du morceau provient chaque paire de canaux.
+
+### 5. Jouer dans Ableton Live
+
+1. Placez **`max/MultiChannelLoop-Browser_03.amxd`** sur une piste audio de Live.
+2. Chargez-y le fichier multicanal produit.
+3. Les canaux étant classés par descripteur, parcourir les boucles avec l'objet revient à voyager dans le son selon ce descripteur : du plus doux au plus fort, du plus calme au plus actif, etc.
+
+<!-- TODO : décrire ici les commandes de l'objet (paramètres, mapping MIDI / OSC). -->
 
 ---
 
-## Descriptors
+## Descripteurs
 
-| Descriptor | What it measures | Method |
+| Descripteur | Ce qu'il mesure | Méthode |
 |---|---|---|
-| **Loudness (LUFS)** | perceived loudness | integrated loudness, ITU-R BS.1770 / EBU R128 (`pyloudnorm`) |
-| **Energy (RMS dB)** | raw signal energy, without perceptual weighting | RMS level in dBFS |
-| **Brightness** | bright / dark timbre | spectral centroid weighted by energy (Hz) |
-| **Harmonicity** | tonal content vs. noise and percussion | harmonic share after harmonic/percussive separation (HPSS), × (1 − spectral flatness) |
-| **Rhythmic activity** | calm ↔ busy, impulsive | average of 4 standardized components: attack density (onsets/s), impulsivity (peaks / median of the attack envelope), percussive share (HPSS), envelope fluctuation (std/mean of the RMS) |
-| **Original position** | — | chronological order in the source file |
+| **Sonie (LUFS)** | volume perçu | sonie intégrée, ITU-R BS.1770 / EBU R128 (`pyloudnorm`) |
+| **Énergie (RMS dB)** | énergie brute du signal, sans pondération perceptive | niveau RMS en dBFS |
+| **Brillance** | timbre clair ou sombre | centroïde spectral pondéré par l'énergie (Hz) |
+| **Harmonicité** | contenu tonal vs bruit et percussions | part harmonique après séparation harmonique/percussive (HPSS), × (1 − platitude spectrale) |
+| **Activité rythmique** | calme ↔ agité, impulsif | moyenne de 4 composantes centrées-réduites : densité d'attaques (onsets/s), impulsivité (pics / médiane de l'enveloppe d'attaques), part percussive (HPSS), fluctuation de l'enveloppe (écart-type / moyenne du RMS) |
+| **Distinctivité** | — | ordre dans lequel la sélection a choisi les boucles (la plus singulière d'abord) |
+| **Position d'origine** | — | ordre chronologique dans le fichier source |
 
-The **rhythmic activity** index is relative: it is computed with respect to the set of loops in the file (each component is centred and scaled). The detailed components are in the CSV, so you can build your own sort.
-
----
-
-## Method
-
-**Slice mode (one file)**
-
-1. **Tempo**: beat detection (`librosa`), then a linear regression over all detected beats → one fixed tempo for the whole piece (rounded when it is very close to a whole number, the typical case for a DAW export).
-2. **Grid phase**: the onset times are folded modulo one beat, which gives a sharp peak, accurate to about a millisecond.
-3. **Downbeat**: among the 4 possible positions, the one that maximizes the low-frequency attacks (kick, bass) is kept.
-4. **Slicing**: consecutive loops of N measures, non-overlapping, starting at the first complete measure. The start of each loop is computed from the theoretical grid (no drift), and **all loops have exactly the same number of samples**.
-5. **Conversion** to the requested format (high-quality *soxr* resampling), mono/stereo, **1 ms fades** at both ends to avoid clicks.
-6. Loops that are almost silent (< −60 LUFS) are ignored.
-
-**Merge mode (several files)**
-
-- The reference length is the median of the lengths: files that differ by a few samples (typical of bounces) are padded or trimmed; a file **exactly half as long** is played twice (loop doubled).
-
-**Sorting and selection**
-
-- The loops are sorted by the descriptor. If there are **more loops than slots** (e.g. 40 loops for 64 tracks = 32 slots), the selection is **spread evenly across the whole range of the descriptor**, from the weakest to the strongest. If there are fewer, the last channels stay silent.
+L'indice d'**activité rythmique** est relatif : il est calculé par rapport à l'ensemble des boucles du fichier (chaque composante est centrée et réduite). Les composantes détaillées figurent dans le CSV, pour construire votre propre classement.
 
 ---
 
-## Limitations
+## Méthode
 
-- The piece must have a **fixed tempo** (DAW export, programmed music). Rubato, accelerando or live music without a click will give an approximate grid: enter the tempo by hand, or prepare the loops in a DAW and use *merge* mode.
-- The downbeat is guessed from the low-frequency attacks: on music without a kick or bass, check the first loop by listening (the starting measure is in the CSV).
-- WAV is limited to 4 GB: beyond that, the file is written as RF64 automatically.
-- In 16 / 24 / 32-bit integer formats, a level above 0 dBFS clips (a warning is shown). The 32-bit float default avoids this problem.
+**Mode découpage (un fichier)** — reprend la méthode du script `loop_slicer.py` (voir `original/`) :
+
+1. **Tempo** : estimation initiale (`librosa`), puis recherche fine du couple (tempo, phase) qui maximise l'enveloppe d'attaques sur une grille régulière (pas de 0,002 BPM, phase à ~0,5 ms près). Le tempo est arrondi au BPM entier s'il en est très proche (cas des exports de DAW).
+2. **Contrôle de dérive** : la grille est recalée par fenêtres de 15 s ; un écart de plus de 25 ms signale un tempo non constant (avertissement dans le journal).
+3. **Premier temps** : parmi les 4 temps possibles, celui qui combine le plus fort changement spectral (chroma + MFCC, synchronisé sur les temps) et les attaques graves (30-120 Hz).
+4. **Grille de phrase** : parmi les mesures possibles, celle où tombent les plus grands changements de section.
+5. **Candidats** : toutes les positions de N mesures qui démarrent sur la grille de phrase. Leur longueur est calculée sur la grille théorique (pas de dérive) : **toutes ont exactement le même nombre d'échantillons**.
+6. **Sélection des plus différenciées** : chaque candidat est décrit par son timbre (MFCC), son harmonie (chroma), sa texture (contraste spectral, bandes de fréquences, attaques, largeur stéréo) et sa sonie. On part de la boucle la plus singulière, puis on ajoute à chaque fois celle qui est la plus éloignée de toutes celles déjà choisies, sans chevauchement, tant que la distance reste au-dessus de la *distinctivité minimale* et dans la limite du nombre de pistes.
+7. **Conversion** au format demandé (rééchantillonnage *soxr* haute qualité si besoin), mono ou stéréo, **micro-fondus** de 1 ms.
+8. **Classement** des boucles retenues selon le descripteur choisi, puis écriture.
+
+**Mode assemblage (plusieurs fichiers)**
+
+- La longueur de référence est la médiane des longueurs : les fichiers qui diffèrent de quelques samples (typique des bounces) sont complétés ou raccourcis ; un fichier **exactement deux fois plus court** est joué deux fois (boucle doublée).
+- S'il y a plus de fichiers que d'emplacements, on garde les plus différenciés (même méthode qu'au point 6).
 
 ---
 
-## Command line
+## Limites
 
-The same engine can be scripted, for example to process a batch of files:
+- Le morceau doit avoir un **tempo fixe** (export de DAW, musique programmée). Rubato, accelerando ou musique jouée sans clic donneront une grille approximative (le journal le signale) : imposez le tempo, ou préparez les boucles dans un DAW et utilisez le mode *assemblage*.
+- Le premier temps est deviné à partir des changements spectraux et des attaques graves : sur une musique sans grosse caisse ni basse, vérifiez à l'écoute et corrigez avec *Correction du 1er temps* (la mesure de départ de chaque boucle est dans le CSV).
+- Le WAV est limité à 4 Go : au-delà, le fichier est écrit en RF64 automatiquement.
+- En 16, 24 ou 32 bits entiers, un niveau au-dessus de 0 dBFS écrête (un avertissement s'affiche). Le 32 bits flottants par défaut évite ce problème.
+
+---
+
+## Ligne de commande
+
+Le même moteur peut être utilisé en script, par exemple pour traiter un lot de fichiers :
 
 ```bash
-.venv/bin/python -m loopslicer piece.wav -m 2 -d activity --order up -t 64
+.venv/bin/python -m loopslicer morceau.wav -m 2 -d activity --order up -t 64
+.venv/bin/python -m loopslicer morceau.wav --bpm 110 --downbeat-shift 1 --individual
 .venv/bin/python -m loopslicer bounces/*.wav -d loudness --order down --mono
 .venv/bin/python -m loopslicer --help
 ```
 
-## Build a macOS application (.app)
+## Construire une application macOS (.app)
 
 ```bash
 ./build_app.sh        # → dist/MultiLoop Slicer.app
 ```
 
-The `.app` contains Python and all dependencies (about 300-500 MB). It can be distributed without installing anything, but since it is not signed, colleagues have to open it the first time with **right-click → Open**.
+Le `.app` contient Python et toutes les dépendances (environ 300 à 500 Mo). Il peut être distribué sans rien installer, mais comme il n'est pas signé, vos collègues devront l'ouvrir la première fois par **clic droit → Ouvrir**.
 
-## Contents of the repository
+## Contenu du dépôt
 
 ```
-loopslicer/engine.py   analysis, slicing, descriptors, export
-loopslicer/gui.py      graphical interface (PySide6)
-loopslicer/cli.py      command line
-max/                   Max for Live device MultiChannelLoop-Browser_03.amxd
-MultiLoop Slicer.command   macOS launcher (double-click)
-build_app.sh           builds the .app with PyInstaller
+loopslicer/engine.py      analyse, découpage, sélection, descripteurs, export
+loopslicer/gui.py         interface graphique (PySide6)
+loopslicer/cli.py         ligne de commande
+max/                      objet Max for Live MultiChannelLoop-Browser_03.amxd
+original/loop_slicer.py   script d'origine (ligne de commande, classement par sonie)
+MultiLoop Slicer.command  lanceur macOS (double-clic)
+build_app.sh              construit l'application .app avec PyInstaller
 ```
 
-## Credits
+## Crédits
 
-Roland Cahen — ENSCi Les Ateliers, CRD, as part of Louise Grebel's thesis.
+Roland Cahen — ENSCi Les Ateliers, CRD, dans le cadre de la thèse de Louise Grebel.
+L'application reprend l'analyse et la sélection du script `loop_slicer.py` : à réglages égaux et à la même fréquence d'échantillonnage, elle produit les mêmes boucles, au sample près.
