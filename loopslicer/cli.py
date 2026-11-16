@@ -31,7 +31,12 @@ def main():
     g.add_argument("--beat-offset-ms", type=float, default=0, help="décalage fin de toute la grille (ms)")
     g.add_argument("--preroll-ms", type=float, default=0)
     g.add_argument("--fade-ms", type=float, default=1, help="micro-fondus anti-clic (0 = coupe franche)")
-    g.add_argument("--min-dist", type=float, default=0.5, help="distinctivité minimale")
+    ap.add_argument("--similarity", type=float, default=80,
+                    help="écarte les boucles ressemblant à plus de N %% à une boucle retenue (80)")
+    ap.add_argument("--keep-similar", action="store_true",
+                    help="ne pas exclure les boucles trop ressemblantes")
+    g.add_argument("--min-dist", type=float, default=None,
+                   help="seuil de distance absolu de loop_slicer.py (remplace --similarity)")
     g.add_argument("--loud-floor", type=float, default=-45, help="ignore les segments sous ce niveau (LUFS)")
     g.add_argument("--weights", type=float, nargs=4, default=[1, 1, 1, 0.7],
                    metavar=("TIMBRE", "HARMONIE", "TEXTURE", "LOUDNESS"))
@@ -45,6 +50,7 @@ def main():
                  phrase_bars=a.phrase_bars, downbeat_shift=a.downbeat_shift,
                  phrase_shift=a.phrase_shift, beat_offset_ms=a.beat_offset_ms,
                  preroll_ms=a.preroll_ms, fade_ms=a.fade_ms, min_dist=a.min_dist,
+                 exclude_similar=not a.keep_similar, similarity_max=a.similarity,
                  loud_floor=a.loud_floor, weights=tuple(a.weights), snap_bpm=not a.no_snap,
                  export_individual=a.individual)
     run(a.inputs, s)

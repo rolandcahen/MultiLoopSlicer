@@ -37,8 +37,9 @@ Il faut **Python 3.10 ou plus récent** ([python.org](https://www.python.org/dow
 3. **Classement** : choisissez le **descripteur** et le **sens** :
    - **↑ Up** : de la valeur la plus faible à la plus forte (canaux 1-2 = la boucle la plus douce, la plus calme, la plus sombre…),
    - **↓ Down** : l'inverse.
+   - **Exclure les boucles trop ressemblantes** (coché par défaut, seuil 80 %) : quand le morceau offre plus de boucles possibles que de pistes, ou contient des passages répétés (refrains, boucles recopiées, bounces en double), on ne garde qu'une boucle par famille de boucles qui se ressemblent. Baissez le seuil (ex. 60 %) pour être plus sévère, et donc obtenir moins de boucles mais plus contrastées ; relevez-le (ex. 95 %) pour n'écarter que les quasi-doublons ; décochez pour tout garder.
 4. **Fichier de sortie** :
-   - **Nombre de pistes** = nombre de canaux du fichier (64 par défaut, soit 32 boucles stéréo au maximum). En *auto*, toutes les boucles retenues par la sélection sont gardées. S'il y a moins de boucles différenciées que d'emplacements, les derniers canaux restent silencieux : baissez la *distinctivité minimale* (réglages avancés) pour en obtenir plus.
+   - **Nombre de pistes** = nombre de canaux du fichier (64 par défaut, soit 32 boucles stéréo au maximum). En *auto*, toutes les boucles retenues par la sélection sont gardées. S'il y a moins de boucles différenciées que d'emplacements, les derniers canaux restent silencieux : relevez le seuil de ressemblance, ou décochez l'exclusion, pour en obtenir plus.
    - **Boucles** : stéréo (2 pistes par boucle) ou mono (1 piste).
    - **Format** : WAV ou AIFF, fréquence d'échantillonnage, résolution. **Par défaut : WAV 48 kHz 32 bits flottants.**
    - **Dossier** : où écrire les fichiers (par défaut, un dossier `<nom du fichier>_Loops` à côté du fichier source). L'application mémorise vos réglages d'une fois sur l'autre.
@@ -56,7 +57,6 @@ Il faut **Python 3.10 ou plus récent** ([python.org](https://www.python.org/dow
 | **Décalage fin de la grille** | les attaques sont coupées (valeur négative) ou arrivent en retard (positive), en ms |
 | **Pré-roll** | démarre chaque boucle quelques ms avant le temps pour garder l'attaque entière |
 | **Micro-fondus** (1 ms) | fondus anti-clic en cosinus aux deux extrémités ; 0 = coupe franche |
-| **Distinctivité minimale** (0,5) | plus haut = moins de boucles mais plus différentes ; 0 = autant que possible |
 | **Ignorer en dessous de** (−45 LUFS) | écarte les passages trop faibles (silences, fins de morceau) |
 | **Exporter chaque boucle** | écrit aussi un fichier par boucle, dans un sous-dossier |
 
@@ -67,7 +67,7 @@ Pour une source `morceau.wav`, boucles de 2 mesures, 32 boucles retenues, class�
 | Fichier | Contenu |
 |---|---|
 | `morceau_2mes_32boucles_64ch_activity_up.wav` | le fichier multicanal à charger dans l'objet Max for Live |
-| `…_index.csv` | une ligne par boucle : rang, canaux, mesure de départ, instant et sample exact dans la source, distinctivité, valeurs de tous les descripteurs |
+| `…_index.csv` | une ligne par boucle : rang, canaux, mesure de départ, instant et sample exact dans la source, distinctivité, ressemblance (en %) avec la plus proche des autres boucles retenues, valeurs de tous les descripteurs |
 | `…_analyse.json` | tempo, premier temps, mesure 1, écarts de grille, réglages utilisés |
 | `…/` (option) | un fichier par boucle, nommé par exemple `01_-23.4LUFS_mes017.wav` |
 
@@ -108,14 +108,16 @@ L'indice d'**activité rythmique** est relatif : il est calculé par rapport à 
 3. **Premier temps** : parmi les 4 temps possibles, celui qui combine le plus fort changement spectral (chroma + MFCC, synchronisé sur les temps) et les attaques graves (30-120 Hz).
 4. **Grille de phrase** : parmi les mesures possibles, celle où tombent les plus grands changements de section.
 5. **Candidats** : toutes les positions de N mesures qui démarrent sur la grille de phrase. Leur longueur est calculée sur la grille théorique (pas de dérive) : **toutes ont exactement le même nombre d'échantillons**.
-6. **Sélection des plus différenciées** : chaque candidat est décrit par son timbre (MFCC), son harmonie (chroma), sa texture (contraste spectral, bandes de fréquences, attaques, largeur stéréo) et sa sonie. On part de la boucle la plus singulière, puis on ajoute à chaque fois celle qui est la plus éloignée de toutes celles déjà choisies, sans chevauchement, tant que la distance reste au-dessus de la *distinctivité minimale* et dans la limite du nombre de pistes.
+6. **Sélection des plus différenciées** : chaque candidat est décrit par son timbre (MFCC), son harmonie (chroma), sa texture (contraste spectral, bandes de fréquences, attaques, largeur stéréo) et sa sonie. On part de la boucle la plus singulière, puis on ajoute à chaque fois celle qui est la plus éloignée de toutes celles déjà choisies, sans chevauchement, dans la limite du nombre de pistes. Si l'exclusion est active, la sélection s'arrête dès que toutes les candidates restantes ressemblent trop à une boucle déjà retenue.
+
+   La **ressemblance** est exprimée par rapport à la distance médiane entre toutes les boucles du morceau : 100 % = identiques, 0 % = aussi différentes que deux boucles prises au hasard. Le seuil de 80 % par défaut équivaut au réglage `--min-dist 0.5` du script d'origine (mêmes boucles retenues).
 7. **Conversion** au format demandé (rééchantillonnage *soxr* haute qualité si besoin), mono ou stéréo, **micro-fondus** de 1 ms.
 8. **Classement** des boucles retenues selon le descripteur choisi, puis écriture.
 
 **Mode assemblage (plusieurs fichiers)**
 
 - La longueur de référence est la médiane des longueurs : les fichiers qui diffèrent de quelques samples (typique des bounces) sont complétés ou raccourcis ; un fichier **exactement deux fois plus court** est joué deux fois (boucle doublée).
-- S'il y a plus de fichiers que d'emplacements, on garde les plus différenciés (même méthode qu'au point 6).
+- Les fichiers trop ressemblants sont écartés (même méthode qu'au point 6), ainsi que ceux en trop s'il y a plus de fichiers que de pistes. Le journal indique, pour chaque fichier écarté, à quel fichier il ressemble et à combien de % : un doublon exact apparaît à 100 %.
 
 ---
 
@@ -136,6 +138,8 @@ Le même moteur peut être utilisé en script, par exemple pour traiter un lot d
 .venv/bin/python -m loopslicer morceau.wav -m 2 -d activity --order up -t 64
 .venv/bin/python -m loopslicer morceau.wav --bpm 110 --downbeat-shift 1 --individual
 .venv/bin/python -m loopslicer bounces/*.wav -d loudness --order down --mono
+.venv/bin/python -m loopslicer morceau.wav --similarity 60      # plus sévère
+.venv/bin/python -m loopslicer morceau.wav --keep-similar       # garder toutes les boucles
 .venv/bin/python -m loopslicer --help
 ```
 

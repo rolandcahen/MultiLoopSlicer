@@ -75,7 +75,10 @@ class Settings:
     beat_offset_ms: float = 0.0          # décalage fin de toute la grille
     preroll_ms: float = 0.0              # démarre chaque boucle un peu avant le temps
     # sélection
-    min_dist: float = 0.5                # distinctivité minimale pour ajouter une boucle
+    exclude_similar: bool = True         # écarte les boucles trop ressemblantes
+    similarity_max: float = 80.0         # % : ressemblance au-delà de laquelle on écarte
+    min_dist: Optional[float] = None     # seuil absolu (expert, cf. loop_slicer.py --min-dist) ;
+                                         # s'il est donné, il remplace similarity_max
     loud_floor: float = -45.0            # ignore les segments sous ce niveau (LUFS)
     weights: tuple = (1.0, 1.0, 1.0, 0.7)  # timbre, harmonie, texture, loudness
     # classement
@@ -102,6 +105,7 @@ class Loop:
     sr_in: int = 0
     audio: Optional[np.ndarray] = field(default=None, repr=False)  # au sr de sortie
     distinct: float = float("nan")          # distance min. aux boucles déjà choisies
+    similarity: float = float("nan")        # % de ressemblance avec la plus proche des autres retenues
     pick_order: int = 0
     features: dict = field(default_factory=dict)
 
@@ -261,10 +265,23 @@ def segment_features(seg, sr):
                 tex=np.r_[con.mean(1), bands, on.mean(), on.std(), side])
 
 
-def select(bars, feats, louds, nbars, n_max, min_dist, loud_floor, weights):
-    """Sélection gloutonne max-min : on part de la boucle la plus éloignée de
-    toutes les autres, puis on ajoute à chaque fois la plus éloignée de celles
-    déjà choisies, sans chevauchement (nbars), tant que la distance ≥ min_dist."""
+def similarity_threshold(D, s):
+    """Distance en dessous de laquelle deux boucles sont « trop ressemblantes ».
+
+    La ressemblance est exprimée en % par rapport à la distance médiane entre
+    toutes les boucles du morceau : 100 % = identiques, 0 % = aussi différentes
+    que deux boucles prises au hasard. 80 % correspond à peu près au seuil
+    --min-dist 0.5 de loop_slicer.py."""
+    if s.min_dist is not None:
+        return float(s.min_dist)
+    if not s.exclude_similar:
+        return 0.0
+    off = D[~np.eye(len(D), dtype=bool)]
+    med = float(np.median(off)) if off.size else 0.0
+    return (1 - s.similarity_max / 100.0) * med
+
+
+def distance_matrix(feats, louds, weights):
     def Z(k):
         X = np.array([f[k] for f in feats])
         X = (X - X.mean(0)) / (X.std(0) + 1e-9)
@@ -273,13 +290,21 @@ def select(bars, feats, louds, nbars, n_max, min_dist, loud_floor, weights):
     blocks = [Z("timbre") * weights[0], Z("harm") * weights[1], Z("tex") * weights[2],
               (L - L.mean()) / (L.std() + 1e-9) * weights[3]]
     X = np.hstack(blocks)
-    D = np.linalg.norm(X[:, None] - X[None], axis=2)
+    return np.linalg.norm(X[:, None] - X[None], axis=2)
+
+
+def select(bars, D, louds, nbars, n_max, min_dist, loud_floor):
+    """Sélection gloutonne max-min : on part de la boucle la plus éloignée de
+    toutes les autres, puis on ajoute à chaque fois la plus éloignée de celles
+    déjà choisies, sans chevauchement (nbars), tant que la distance ≥ min_dist.
+    Renvoie ([(indice, distance)], raison de l'arrêt)."""
     bars = np.asarray(bars)
     valid = np.isfinite(louds) & (louds > loud_floor)
     if not valid.any():
-        return []
+        return [], "aucune boucle assez forte"
     first = int(np.argmax(np.where(valid, D.sum(1), -1)))
     sel, dmins = [first], [np.inf]
+    reason = "plus de candidates disponibles"
     while len(sel) < n_max:
         best, bi = -1, None
         for i in range(len(bars)):
@@ -288,11 +313,27 @@ def select(bars, feats, louds, nbars, n_max, min_dist, loud_floor, weights):
             d = D[i, sel].min()
             if d > best:
                 best, bi = d, i
-        if bi is None or best < min_dist:
+        if bi is None:
+            break
+        if best < min_dist:
+            reason = "les autres candidates ressemblent trop aux boucles retenues"
             break
         sel.append(bi)
         dmins.append(best)
-    return list(zip(sel, dmins))
+    else:
+        reason = "nombre de pistes atteint"
+    return list(zip(sel, dmins)), reason
+
+
+def _similarities(D, idx):
+    """% de ressemblance de chaque boucle retenue avec la plus proche des autres."""
+    off = D[~np.eye(len(D), dtype=bool)]
+    med = float(np.median(off)) if off.size else 1.0
+    out = []
+    for i in idx:
+        others = [D[i, j] for j in idx if j != i]
+        out.append(100 * max(0.0, 1 - min(others) / med) if others and med > 0 else float("nan"))
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -381,19 +422,23 @@ def slice_file(path: str, s: Settings, log: Logger, progress: Progress):
     louds = np.array(louds)
 
     n_max = _slots(s, len(cands))
-    picked = select([c[0] for c in cands], feats, louds, nbars, n_max,
-                    s.min_dist, s.loud_floor, s.weights)
+    D = distance_matrix(feats, louds, s.weights)
+    thr = similarity_threshold(D, s)
+    picked, reason = select([c[0] for c in cands], D, louds, nbars, n_max, thr, s.loud_floor)
+    sims = _similarities(D, [i for i, _ in picked])
     log(f"Sélection : {len(picked)} boucles différenciées (sur {n_max} demandées), "
-        f"sans chevauchement, ≥ {s.loud_floor:.0f} LUFS")
+        f"sans chevauchement, ≥ {s.loud_floor:.0f} LUFS — arrêt : {reason}")
+    if s.exclude_similar and s.min_dist is None:
+        log(f"  boucles trop ressemblantes écartées (ressemblance > {s.similarity_max:.0f} %)")
 
     loop_seconds = nbars * BAR
     length_out = int(round(loop_seconds * s.sample_rate))
     loops = []
-    for order, (i, dm) in enumerate(picked, 1):
+    for order, ((i, dm), sim) in enumerate(zip(picked, sims), 1):
         bar, st = cands[i]
         loops.append(Loop(index=bar // s.phrase_bars + 1, source=os.path.basename(path),
                           start_sample=st, start_measure=bar + 1, raw=y[st:st + L], sr_in=sr,
-                          distinct=float(dm), pick_order=order))
+                          distinct=float(dm), similarity=sim, pick_order=order))
     log(f"Boucles de {nbars} mesure(s) = {loop_seconds:.4f} s "
         f"({L} samples à {sr} Hz → {length_out} à {s.sample_rate} Hz)")
     info = dict(mode="slice", bpm=bpm, beat0_s=beat0, downbeat_beat=db, phrase_bar=pb,
@@ -432,15 +477,28 @@ def merge_files(paths: Sequence[str], s: Settings, log: Logger, progress: Progre
         progress(0.05 + 0.5 * (i + 1) / len(raw))
 
     n_max = _slots(s, len(loops))
-    if len(loops) > n_max:
-        picked = select(np.arange(len(loops)), feats, np.array(louds), 0, n_max,
-                        -np.inf, s.loud_floor, s.weights)
-        log(f"{len(loops)} fichiers pour {n_max} emplacements : on garde les {len(picked)} plus différenciés")
+    louds = np.array(louds)
+    D = distance_matrix(feats, louds, s.weights)
+    if len(loops) > n_max or s.exclude_similar or s.min_dist is not None:
+        thr = similarity_threshold(D, s)
+        picked, reason = select(np.arange(len(loops)), D, louds, 0, n_max, thr, s.loud_floor)
+        dropped = sorted(set(range(len(loops))) - {i for i, _ in picked})
+        log(f"{len(picked)} fichiers retenus sur {len(loops)} — arrêt : {reason}")
+        for i in dropped:
+            if not (np.isfinite(louds[i]) and louds[i] > s.loud_floor):
+                why = "trop faible"
+            else:
+                j = min((k for k, _ in picked), key=lambda k: D[i, k])
+                med = float(np.median(D[~np.eye(len(D), dtype=bool)]))
+                why = (f"ressemble à {loops[j].source} "
+                       f"({100 * max(0, 1 - D[i, j] / med):.0f} %)")
+            log(f"  écarté : {loops[i].source} — {why}")
     else:
         picked = [(i, np.nan) for i in range(len(loops))]
+    sims = _similarities(D, [i for i, _ in picked])
     chosen = []
-    for order, (i, dm) in enumerate(picked, 1):
-        loops[i].distinct, loops[i].pick_order = float(dm), order
+    for order, ((i, dm), sim) in enumerate(zip(picked, sims), 1):
+        loops[i].distinct, loops[i].pick_order, loops[i].similarity = float(dm), order, sim
         chosen.append(loops[i])
     info = dict(mode="merge", loop_seconds=length_out / s.sample_rate, loop_samples=length_out)
     return chosen, info
@@ -521,9 +579,12 @@ def write_output(ranked: List[Loop], info: dict, src_paths: Sequence[str],
     if s.n_tracks > 0 and s.n_tracks % cpl:
         log(f"Remarque : {s.n_tracks} pistes n'est pas un multiple de {cpl} — {slots} boucles")
     if len(ranked) < slots:
-        log(f"Seulement {len(ranked)} boucles différenciées pour {slots} emplacements : "
-            f"les {slots - len(ranked)} derniers seront silencieux "
-            f"(baissez la distinctivité minimale pour en obtenir plus)")
+        hint = (" (relevez le seuil de ressemblance, ou décochez « exclure les boucles "
+                "trop ressemblantes », pour en obtenir plus)"
+                if s.exclude_similar or s.min_dist is not None
+                else " (le morceau ne contient pas plus de boucles complètes)")
+        log(f"Seulement {len(ranked)} boucles pour {slots} emplacements : "
+            f"les {slots - len(ranked)} derniers seront silencieux{hint}")
     n_ch = slots * cpl
     length = info["loop_samples"]
     data = np.zeros((length, n_ch), dtype=np.float32)
@@ -566,7 +627,8 @@ def write_output(ranked: List[Loop], info: dict, src_paths: Sequence[str],
     with open(csv_path, "w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
         w.writerow(["rang", "canaux", "source", "mesure_debut", "debut_s",
-                    "debut_echantillon", "distinctivite", "ordre_selection", *FEATURE_KEYS]
+                    "debut_echantillon", "distinctivite", "ressemblance_max_%", "ordre_selection",
+                    *FEATURE_KEYS]
                    + (["fichier"] if loop_names else []))
         for i, L in enumerate(ranked):
             c0 = i * cpl + 1
@@ -575,6 +637,7 @@ def write_output(ranked: List[Loop], info: dict, src_paths: Sequence[str],
                         int(L.start_measure) if np.isfinite(L.start_measure) else "",
                         f"{L.start_sample / L.sr_in:.4f}", L.start_sample,
                         "" if not np.isfinite(L.distinct) else round(L.distinct, 2),
+                        "" if not np.isfinite(L.similarity) else round(L.similarity),
                         L.pick_order,
                         *[f"{L.features.get(k, float('nan')):.4f}" for k in FEATURE_KEYS]]
                        + ([loop_names[i]] if loop_names else []))

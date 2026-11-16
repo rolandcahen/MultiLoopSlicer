@@ -130,6 +130,20 @@ class MainWindow(QWidget):
         self.order.addItem("↑ Up — du plus faible au plus fort", True)
         self.order.addItem("↓ Down — du plus fort au plus faible", False)
         f.addRow("Sens", self.order)
+        sim_row = QHBoxLayout()
+        self.excl = QCheckBox("Exclure les boucles trop ressemblantes")
+        self.excl.setChecked(True)
+        self.excl.setToolTip("Quand le morceau offre plus de boucles possibles que nécessaire, "
+                             "ou contient des passages répétés, on ne garde qu'une boucle par "
+                             "famille de boucles qui se ressemblent.")
+        self.sim = QSpinBox(); self.sim.setRange(30, 99); self.sim.setValue(80)
+        self.sim.setSuffix(" %"); self.sim.setPrefix("au-delà de ")
+        self.sim.setToolTip("Ressemblance (timbre, harmonie, texture, sonie) au-delà de laquelle "
+                            "une boucle est écartée. 100 % = identiques. Plus bas = plus sévère, "
+                            "donc moins de boucles.")
+        self.excl.toggled.connect(self.sim.setEnabled)
+        sim_row.addWidget(self.excl); sim_row.addWidget(self.sim); sim_row.addStretch()
+        f.addRow("Sélection", sim_row)
         root.addWidget(g_ord)
 
         # --- sortie ---------------------------------------------------------
@@ -180,10 +194,6 @@ class MainWindow(QWidget):
         f.addRow("Pré-roll", self.preroll)
         self.fade = QDoubleSpinBox(); self.fade.setRange(0, 50); self.fade.setValue(1); self.fade.setSuffix(" ms")
         f.addRow("Micro-fondus anti-clic", self.fade)
-        self.min_dist = QDoubleSpinBox(); self.min_dist.setRange(0, 10); self.min_dist.setSingleStep(0.1)
-        self.min_dist.setValue(0.5)
-        self.min_dist.setToolTip("Plus haut = moins de boucles mais plus différentes ; 0 = autant que possible")
-        f.addRow("Distinctivité minimale", self.min_dist)
         self.floor = QDoubleSpinBox(); self.floor.setRange(-90, 0); self.floor.setValue(-45)
         self.floor.setSuffix(" LUFS")
         f.addRow("Ignorer en dessous de", self.floor)
@@ -222,7 +232,8 @@ class MainWindow(QWidget):
         self.tracks.setValue(int(p.value("tracks", 64)))
         self.out_dir.setText(p.value("out_dir", ""))
         self.phrase.setValue(int(p.value("phrase", 2)))
-        self.min_dist.setValue(float(p.value("min_dist", 0.5)))
+        self.excl.setChecked(p.value("exclude_similar", "true") in (True, "true"))
+        self.sim.setValue(int(p.value("similarity", 80)))
         self.floor.setValue(float(p.value("floor", -45)))
         self.individual.setChecked(p.value("individual", "false") in (True, "true"))
 
@@ -234,7 +245,8 @@ class MainWindow(QWidget):
         p.setValue("tracks", self.tracks.value())
         p.setValue("out_dir", self.out_dir.text())
         p.setValue("phrase", self.phrase.value())
-        p.setValue("min_dist", self.min_dist.value())
+        p.setValue("exclude_similar", self.excl.isChecked())
+        p.setValue("similarity", self.sim.value())
         p.setValue("floor", self.floor.value())
         p.setValue("individual", self.individual.isChecked())
 
@@ -275,7 +287,8 @@ class MainWindow(QWidget):
             beat_offset_ms=self.offset.value(),
             preroll_ms=self.preroll.value(),
             fade_ms=self.fade.value(),
-            min_dist=self.min_dist.value(),
+            exclude_similar=self.excl.isChecked(),
+            similarity_max=float(self.sim.value()),
             loud_floor=self.floor.value(),
             export_individual=self.individual.isChecked(),
         )
