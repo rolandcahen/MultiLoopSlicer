@@ -169,6 +169,10 @@ MultiLoop Slicer.command  macOS launcher (double-click)
 build_app.sh              builds the .app with PyInstaller
 ```
 
+## License
+
+MIT — see [LICENSE](LICENSE).
+
 ## Credits
 
 Roland Cahen — ENSCi Les Ateliers, CRD, as part of Louise Grebel's PhD research.
