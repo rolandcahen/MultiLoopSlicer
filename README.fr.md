@@ -6,7 +6,7 @@ Petite application autonome pour le **design sonore interactif** : elle découpe
 
 Toutes les boucles ont exactement la même longueur en échantillons et commencent sur un premier temps de la même grille de phrases : elles peuvent être permutées ou mixées à tout moment.
 
-Le fichier se joue ensuite avec l'objet Max for Live **`MultiChannelLoop-Browser_03.amxd`** (dossier `max/`), qui permet de passer continûment d'une boucle à l'autre, par exemple de la plus calme à la plus active, en fonction d'un paramètre de contrôle (geste, capteur, interaction…).
+Le fichier se joue ensuite avec l'objet Max for Live **`MultiChannelLoop-Browser_05.amxd`** (dossier `max/`), qui permet de passer continûment d'une boucle à l'autre, par exemple de la plus calme à la plus active, en fonction d'un paramètre de contrôle (geste, capteur, interaction…).
 
 ![Interface](docs/interface.png)
 
@@ -77,7 +77,7 @@ Le CSV s'ouvre dans Excel ou Numbers : il permet de retrouver de quel passage du
 
 ### 5. Jouer dans Ableton Live
 
-1. Placez **`max/MultiChannelLoop-Browser_03.amxd`** sur une piste audio de Live.
+1. Placez **`max/MultiChannelLoop-Browser_05.amxd`** sur une piste audio de Live.
 2. Chargez-y le fichier multicanal produit.
 3. Les canaux étant classés par descripteur, parcourir les boucles avec l'objet revient à voyager dans le son selon ce descripteur : du plus doux au plus fort, du plus calme au plus actif, etc.
 
@@ -159,7 +159,7 @@ Le `.app` contient Python et toutes les dépendances (environ 300 à 500 Mo). Il
 loopslicer/engine.py      analyse, découpage, sélection, descripteurs, export
 loopslicer/gui.py         interface graphique (PySide6)
 loopslicer/cli.py         ligne de commande
-max/                      objet Max for Live MultiChannelLoop-Browser_03.amxd
+max/                      objet Max for Live MultiChannelLoop-Browser_05.amxd
 original/loop_slicer.py   script d'origine (ligne de commande, classement par sonie)
 MultiLoop Slicer.command  lanceur macOS (double-clic)
 build_app.sh              construit l'application .app avec PyInstaller

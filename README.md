@@ -6,7 +6,7 @@ A small standalone application for **interactive sound design**. It cuts an audi
 
 All loops have exactly the same length in samples and start on a downbeat of the same phrase grid, so they can be swapped or mixed at any moment.
 
-The file is then played with the Max for Live device **`MultiChannelLoop-Browser_03.amxd`** (`max/` folder), which lets you move continuously from one loop to another — for instance from the calmest to the most active — driven by a control parameter (gesture, sensor, interaction…).
+The file is then played with the Max for Live device **`MultiChannelLoop-Browser_05.amxd`** (`max/` folder), which lets you move continuously from one loop to another — for instance from the calmest to the most active — driven by a control parameter (gesture, sensor, interaction…).
 
 ![Interface](docs/interface.png)
 
@@ -81,7 +81,7 @@ The CSV opens in Excel or Numbers and tells you which passage of the piece each 
 
 ### 5. Playing in Ableton Live
 
-1. Put **`max/MultiChannelLoop-Browser_03.amxd`** on an audio track in Live.
+1. Put **`max/MultiChannelLoop-Browser_05.amxd`** on an audio track in Live.
 2. Load the generated multichannel file into it.
 3. Since the channels are sorted by descriptor, browsing the loops with the device means travelling through the sound along that descriptor: from softest to loudest, from calmest to most active, etc.
 
@@ -163,7 +163,7 @@ The `.app` bundles Python and all dependencies (about 300-500 MB) and can be sha
 loopslicer/engine.py      analysis, slicing, selection, descriptors, export
 loopslicer/gui.py         graphical interface (PySide6)
 loopslicer/cli.py         command line
-max/                      Max for Live device MultiChannelLoop-Browser_03.amxd
+max/                      Max for Live device MultiChannelLoop-Browser_05.amxd
 original/loop_slicer.py   original script (command line, loudness ordering)
 MultiLoop Slicer.command  macOS launcher (double-click)
 build_app.sh              builds the .app with PyInstaller
