@@ -1,2 +1,2 @@
-Placez ici `MultiChannelLoop-Browser_03.amxd` (objet Max for Live).
-Il joue les fichiers multicanaux produits par MultiLoop Slicer.
+Put `MultiChannelLoop-Browser_03.amxd` (Max for Live device) here.
+It plays the multichannel files produced by MultiLoop Slicer.
